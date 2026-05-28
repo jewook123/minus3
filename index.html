@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>나스닥 -3% 룰 감지기</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+<style>
+:root {
+  --bg: #0d1117;
+  --card: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+  --blue: #58a6ff;
+  --orange: #fb8f44;
+  --purple: #bc8cff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; min-height: 100vh; }
+
+.header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.header h1 { font-size: 1.3rem; font-weight: 700; }
+.header-right { display: flex; align-items: center; gap: 12px; }
+.last-updated { font-size: 0.75rem; color: var(--muted); }
+.btn { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+.btn:hover { background: var(--border); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.state-banner { padding: 14px 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.state-banner.normal { background: rgba(63,185,80,.1); border-color: var(--green); }
+.state-banner.observation { background: rgba(210,153,34,.1); border-color: var(--yellow); }
+.state-banner.panic { background: rgba(248,81,73,.1); border-color: var(--red); }
+.state-title { font-size: 1.05rem; font-weight: 700; }
+.state-desc { font-size: 0.82rem; color: var(--muted); margin-top: 4px; }
+.state-days { font-size: 1rem; font-weight: 700; white-space: nowrap; }
+
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+@media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 600px) { .grid-3, .grid-2 { grid-template-columns: 1fr; } }
+
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.card h2 { font-size: 0.78rem; font-weight: 600; color: var(--muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.card-value { font-size: 1.8rem; font-weight: 700; margin-bottom: 4px; }
+.card-sub { font-size: 0.8rem; color: var(--muted); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; margin-top: 6px; }
+.badge-red { background: rgba(248,81,73,.2); color: var(--red); }
+.badge-green { background: rgba(63,185,80,.2); color: var(--green); }
+.badge-yellow { background: rgba(210,153,34,.2); color: var(--yellow); }
+.badge-muted { background: rgba(139,148,158,.15); color: var(--muted); }
+.pos { color: var(--green); }
+.neg { color: var(--red); }
+
+.progress-bar { height: 6px; background: var(--border); border-radius: 3px; margin: 8px 0 4px; overflow: hidden; }
+.progress-fill { height: 100%; border-radius: 3px; }
+
+/* Companies */
+.company-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.company-row:last-of-type { border-bottom: none; }
+.rank-badge { width: 26px; height: 26px; background: var(--border); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; flex-shrink: 0; }
+.company-info { flex: 1; min-width: 0; }
+.company-name { font-weight: 600; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.company-ticker { font-size: 0.72rem; color: var(--muted); }
+.company-right { text-align: right; flex-shrink: 0; }
+.company-cap { font-size: 0.9rem; font-weight: 600; }
+.company-chg { font-size: 0.8rem; }
+
+.cap-diff-box { text-align: center; padding: 10px; margin-top: 10px; background: rgba(88,166,255,.05); border-radius: 6px; border: 1px solid rgba(88,166,255,.2); }
+.cap-diff-label { font-size: 0.72rem; color: var(--muted); }
+.cap-diff-value { font-size: 1.15rem; font-weight: 700; color: var(--blue); margin-top: 2px; }
+
+/* Sell levels */
+.sell-level-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.82rem; }
+.sell-level-pct { width: 52px; font-weight: 600; flex-shrink: 0; }
+.sell-level-track { flex: 1; height: 7px; background: var(--border); border-radius: 4px; }
+.sell-level-fill { height: 100%; border-radius: 4px; }
+.sell-level-action { width: 70px; text-align: right; flex-shrink: 0; font-size: 0.75rem; color: var(--muted); }
+.sell-level-passed .sell-level-pct { color: var(--orange); }
+.sell-level-passed .sell-level-action { color: var(--orange); }
+
+/* Chart */
+.chart-wrap { position: relative; height: 300px; }
+
+/* History */
+.history-list { max-height: 210px; overflow-y: auto; }
+.history-item { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 0.84rem; }
+.history-item:last-child { border-bottom: none; }
+.history-date { color: var(--muted); }
+.del-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px 6px; font-size: 0.82rem; line-height: 1; border-radius: 4px; }
+.del-btn:hover { color: var(--red); background: rgba(248,81,73,.1); }
+
+.manual-add { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.date-input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 0.84rem; }
+.add-btn { background: rgba(248,81,73,.15); border: 1px solid rgba(248,81,73,.4); color: var(--red); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.84rem; white-space: nowrap; }
+.add-btn:hover { background: rgba(248,81,73,.25); }
+
+.loading { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.84rem; padding: 20px 0; }
+.spinner { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin .7s linear infinite; flex-shrink: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.error-box { padding: 10px 14px; background: rgba(248,81,73,.1); border: 1px solid rgba(248,81,73,.4); border-radius: 6px; font-size: 0.83rem; color: var(--red); margin-bottom: 14px; }
+
+.section-mb { margin-bottom: 14px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📉 나스닥 -3% 룰 감지기</h1>
+  <div class="header-right">
+    <span class="last-updated" id="lastUpdated"></span>
+    <button class="btn" id="refreshBtn" onclick="loadAll()">↻ 새로고침</button>
+  </div>
+</div>
+
+<div id="errorBox" class="error-box" style="display:none"></div>
+
+<div id="stateBanner" class="state-banner normal">
+  <div>
+    <div class="state-title" id="stateTitle">정상</div>
+    <div class="state-desc" id="stateDesc"></div>
+  </div>
+  <div class="state-days" id="stateDays"></div>
+</div>
+
+<div class="grid-3 section-mb">
+  <div class="card">
+    <h2>나스닥 일간 등락</h2>
+    <div class="card-value" id="nasdaqChg">--</div>
+    <div class="card-sub" id="nasdaqPrice">로딩 중...</div>
+    <div id="nasdaqBadge"></div>
+  </div>
+  <div class="card">
+    <h2>최근 30일 -3% 횟수</h2>
+    <div class="card-value" id="monthCount">--</div>
+    <div class="card-sub">공황 기준: 4회</div>
+    <div id="panicProg"></div>
+  </div>
+  <div class="card">
+    <h2>재매수까지 남은 일수</h2>
+    <div class="card-value" id="buyDays">--</div>
+    <div class="card-sub" id="buyDesc">--</div>
+  </div>
+</div>
+
+<div class="grid-2 section-mb">
+  <div class="card">
+    <h2>시총 순위 (나스닥 상장사)</h2>
+    <div id="companyList"><div class="loading"><div class="spinner"></div>로딩 중...</div></div>
+    <div class="cap-diff-box" id="capDiffBox" style="display:none">
+      <div class="cap-diff-label">1위 − 2위 시총 차이</div>
+      <div class="cap-diff-value" id="capDiffVal">--</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>전고점 대비 하락 구간 (시총 1위)</h2>
+    <div id="fromHighSection"><div class="loading"><div class="spinner"></div>로딩 중...</div></div>
+  </div>
+</div>
+
+<div class="card section-mb">
+  <h2 id="chartTitle">시총 1위 주가 (1년) — 전고점 &amp; 매도 구간</h2>
+  <div class="chart-wrap"><canvas id="priceChart"></canvas></div>
+</div>
+
+<div class="card">
+  <h2>-3% 발생 기록</h2>
+  <div class="history-list" id="historyList"></div>
+  <div class="manual-add">
+    <input type="date" class="date-input" id="manualDate">
+    <button class="add-btn" onclick="addManual()">+ 수동 추가</button>
+  </div>
+</div>
+
+<script>
+// ── CONFIG ────────────────────────────────────────────────
+const WATCHLIST = ['AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA'];
+const NASDAQ_SYM = '%5EIXIC'; // ^IXIC URL-encoded
+const SELL_LEVELS = [-2.5,-5,-7.5,-10,-12.5,-15,-17.5,-20];
+const PROXY = 'https://corsproxy.io/?';
+
+// ── STORAGE ───────────────────────────────────────────────
+function getEvents() {
+  try { return JSON.parse(localStorage.getItem('m3_events') || '[]'); }
+  catch { return []; }
+}
+function saveEvents(ev) { localStorage.setItem('m3_events', JSON.stringify(ev)); }
+
+function addEvent(dateStr, source) {
+  const ev = getEvents();
+  if (ev.find(e => e.date === dateStr)) return;
+  ev.push({ date: dateStr, source: source || 'manual' });
+  ev.sort((a,b) => a.date.localeCompare(b.date));
+  saveEvents(ev);
+  renderHistory(); updateStateUI();
+}
+function removeEvent(dateStr) {
+  saveEvents(getEvents().filter(e => e.date !== dateStr));
+  renderHistory(); updateStateUI();
+}
+
+// ── STATE MACHINE ─────────────────────────────────────────
+function computeState() {
+  const events = getEvents();
+  if (!events.length) return { state:'normal', daysLeft:0 };
+
+  const today = new Date(); today.setHours(0,0,0,0);
+  const dates = events.map(e => { const d = new Date(e.date); d.setHours(0,0,0,0); return d; })
+                      .sort((a,b) => a-b);
+
+  // Find most recent active panic window (4 events within 30 days)
+  for (let i = dates.length - 4; i >= 0; i--) {
+    const win30 = new Date(dates[i]); win30.setDate(win30.getDate() + 30);
+    const inWin = dates.filter(d => d >= dates[i] && d <= win30);
+    if (inWin.length >= 4) {
+      const panicEnd = new Date(dates[i]); panicEnd.setDate(panicEnd.getDate() + 61);
+      if (today <= panicEnd) {
+        return { state:'panic', daysLeft: Math.ceil((panicEnd - today) / 864e5) };
+      }
+    }
+  }
+
+  // Observation: last event within 31 days
+  const lastDate = dates[dates.length - 1];
+  const obEnd = new Date(lastDate); obEnd.setDate(obEnd.getDate() + 31);
+  if (today <= obEnd) {
+    return { state:'observation', daysLeft: Math.ceil((obEnd - today) / 864e5) };
+  }
+  return { state:'normal', daysLeft:0 };
+}
+
+function countRecent30() {
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 30); cutoff.setHours(0,0,0,0);
+  return getEvents().filter(e => new Date(e.date) >= cutoff).length;
+}
+
+// ── UI ────────────────────────────────────────────────────
+function updateStateUI() {
+  const { state, daysLeft } = computeState();
+  const banner = document.getElementById('stateBanner');
+  banner.className = 'state-banner ' + state;
+
+  const cfg = {
+    normal:      { title:'✅ 정상 (보유 또는 재매수 가능)', desc:'현재 관망·공황 조건에 해당하지 않습니다.', days:'' },
+    observation: { title:'⚠️ 관망기 — 전량 매도 상태', desc:'-3% 발생 후 관망 중. 추가 -3% 없을 시 31일 후 재매수.', days:`D-${daysLeft} 남음` },
+    panic:       { title:'🚨 공황 상태 — 전량 매도', desc:'30일 내 -3% 4회 이상. 최초 발생일 기준 61일 후 재매수.', days:`D-${daysLeft} 남음` },
+  };
+  document.getElementById('stateTitle').textContent = cfg[state].title;
+  document.getElementById('stateDesc').textContent  = cfg[state].desc;
+  document.getElementById('stateDays').textContent  = cfg[state].days;
+
+  const cnt = countRecent30();
+  document.getElementById('monthCount').textContent = cnt + '회';
+  document.getElementById('panicProg').innerHTML = `
+    <div class="progress-bar">
+      <div class="progress-fill" style="width:${Math.min(cnt/4*100,100)}%;background:${cnt>=4?'var(--red)':cnt>=3?'var(--yellow)':'var(--green)'}"></div>
+    </div>
+    <div class="card-sub">${cnt}/4회 (${cnt>=4?'공황 돌입':'공황까지 '+(4-cnt)+'회'})</div>
+  `;
+
+  if (state === 'normal') {
+    document.getElementById('buyDays').textContent = '-';
+    document.getElementById('buyDesc').textContent = '정상 보유 상태';
+  } else {
+    document.getElementById('buyDays').textContent = daysLeft + '일';
+    document.getElementById('buyDesc').textContent = state === 'panic' ? '공황 종료 후 재매수' : '관망기 종료 후 재매수';
+  }
+}
+
+function renderHistory() {
+  const events = getEvents();
+  const el = document.getElementById('historyList');
+  if (!events.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:.84rem;padding:10px 0">기록 없음</div>';
+    return;
+  }
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate()-30);
+  el.innerHTML = [...events].reverse().map(e => {
+    const recent = new Date(e.date) >= cutoff;
+    return `<div class="history-item">
+      <span class="history-date">${fmtDate(e.date)}</span>
+      <span class="badge ${recent?'badge-red':'badge-muted'}">${e.source==='auto'?'자동감지':'수동입력'}</span>
+      <button class="del-btn" onclick="removeEvent('${e.date}')" title="삭제">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function fmtDate(s) {
+  const d = new Date(s);
+  return `${d.getFullYear()}.${String(d.getMonth()+1).padStart(2,'0')}.${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function fmtCap(v) {
+  if (v >= 1e12) return `$${(v/1e12).toFixed(2)}T`;
+  if (v >= 1e9)  return `$${(v/1e9).toFixed(1)}B`;
+  return `$${(v/1e6).toFixed(0)}M`;
+}
+
+function addManual() {
+  const v = document.getElementById('manualDate').value;
+  if (!v) return;
+  addEvent(v, 'manual');
+  document.getElementById('manualDate').value = '';
+}
+
+// ── API ───────────────────────────────────────────────────
+async function yf(path) {
+  const url = 'https://query1.finance.yahoo.com' + path;
+  // Try direct; fall back to CORS proxy
+  for (const base of ['', PROXY]) {
+    try {
+      const res = await fetch(base + (base ? encodeURIComponent(url) : url),
+        { signal: AbortSignal.timeout(8000) });
+      if (res.ok) return res.json();
+    } catch {}
+  }
+  throw new Error('데이터 로딩 실패 (네트워크/CORS)');
+}
+
+async function fetchQuotes(syms) {
+  const fields = 'regularMarketPrice,regularMarketChangePercent,marketCap,shortName';
+  const data = await yf(`/v7/finance/quote?symbols=${syms.join(',')}&fields=${fields}`);
+  return data?.quoteResponse?.result || [];
+}
+
+async function fetchChart(sym, range, interval) {
+  const data = await yf(`/v8/finance/chart/${sym}?interval=${interval}&range=${range}`);
+  const r = data?.chart?.result?.[0];
+  if (!r) throw new Error('차트 데이터 없음');
+  const ts = r.timestamp || [];
+  const q  = r.indicators?.quote?.[0] || {};
+  const dates = ts.map(t => {
+    const d = new Date(t * 1000);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  });
+  return { meta: r.meta, dates, closes: q.close || [], highs: q.high || [] };
+}
+
+// ── CHART ─────────────────────────────────────────────────
+let chartInst = null;
+
+function renderPriceChart(sym, dates, closes, ath) {
+  const ctx = document.getElementById('priceChart').getContext('2d');
+  if (chartInst) chartInst.destroy();
+
+  const eventDates = new Set(getEvents().map(e => e.date));
+  const ptColor = dates.map(d => eventDates.has(d) ? '#f85149' : 'transparent');
+  const ptRadius = dates.map(d => eventDates.has(d) ? 5 : 0);
+
+  const annots = {
+    ath: {
+      type:'line', yMin:ath, yMax:ath,
+      borderColor:'rgba(63,185,80,.9)', borderWidth:2, borderDash:[6,4],
+      label:{ display:true, content:'전고점', position:'end',
+              backgroundColor:'rgba(63,185,80,.85)', color:'#fff', font:{size:10} }
+    }
+  };
+
+  const levelColors = ['#fb8f44','#f85149','#bc8cff','#58a6ff'];
+  SELL_LEVELS.forEach((pct, i) => {
+    const price = ath * (1 + pct/100);
+    const col = levelColors[Math.floor(i/2) % levelColors.length];
+    annots['lv'+i] = {
+      type:'line', yMin:price, yMax:price,
+      borderColor:col+'99', borderWidth:1.2, borderDash:[3,4],
+      label: i < 6 ? {
+        display:true, content:`${pct}%`, position:'end',
+        backgroundColor:col+'cc', color:'#fff', font:{size:9}
+      } : { display:false }
+    };
+  });
+
+  chartInst = new Chart(ctx, {
+    type:'line',
+    data:{
+      labels:dates,
+      datasets:[{
+        data:closes, borderColor:'#58a6ff',
+        backgroundColor:'rgba(88,166,255,.06)',
+        borderWidth:1.5, fill:true, tension:.1,
+        pointBackgroundColor:ptColor, pointRadius:ptRadius, pointHoverRadius:4,
+      }]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{ intersect:false, mode:'index' },
+      scales:{
+        x:{ grid:{color:'rgba(48,54,61,.5)'}, ticks:{color:'#8b949e',maxTicksLimit:10,font:{size:10}} },
+        y:{ grid:{color:'rgba(48,54,61,.5)'}, ticks:{color:'#8b949e',font:{size:10}} }
+      },
+      plugins:{ legend:{display:false}, annotation:{annotations:annots} }
+    }
+  });
+}
+
+// ── RENDER COMPANIES ──────────────────────────────────────
+function renderCompanies(quotes) {
+  const sorted = quotes.filter(q=>q.marketCap>0).sort((a,b)=>b.marketCap-a.marketCap);
+  const top5 = sorted.slice(0,5);
+
+  document.getElementById('companyList').innerHTML = top5.map((q,i) => {
+    const chg = q.regularMarketChangePercent || 0;
+    return `<div class="company-row">
+      <div class="rank-badge">${i+1}</div>
+      <div class="company-info">
+        <div class="company-name">${q.shortName || q.symbol}</div>
+        <div class="company-ticker">${q.symbol}</div>
+      </div>
+      <div class="company-right">
+        <div class="company-cap">${fmtCap(q.marketCap)}</div>
+        <div class="company-chg ${chg>=0?'pos':'neg'}">${chg>=0?'+':''}${chg.toFixed(2)}%</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  if (sorted.length >= 2) {
+    const diff = sorted[0].marketCap - sorted[1].marketCap;
+    document.getElementById('capDiffBox').style.display = 'block';
+    document.getElementById('capDiffVal').textContent = fmtCap(diff);
+  }
+  return sorted;
+}
+
+// ── FROM HIGH ─────────────────────────────────────────────
+function renderFromHigh(sym, currentPrice, ath) {
+  const pct = (currentPrice - ath) / ath * 100;
+  const absPct = Math.abs(pct);
+  const passedCount = SELL_LEVELS.filter(l => pct <= l).length;
+
+  let barColor = 'var(--green)';
+  if (absPct >= 10) barColor = 'var(--red)';
+  else if (absPct >= 5) barColor = 'var(--yellow)';
+  else if (absPct >= 2.5) barColor = 'var(--orange)';
+
+  const rows = SELL_LEVELS.map(l => {
+    const passed = pct <= l;
+    const sellPrice = ath * (1 + l/100);
+    const cls = passed ? 'sell-level-row sell-level-passed' : 'sell-level-row';
+    const fillW = passed ? 100 : Math.max(0, Math.min(100, (absPct / Math.abs(l)) * 100));
+    const fillColor = passed ? 'var(--orange)' : 'var(--border)';
+    return `<div class="${cls}">
+      <span class="sell-level-pct">${l}%</span>
+      <div class="sell-level-track"><div class="sell-level-fill" style="width:${fillW}%;background:${fillColor}"></div></div>
+      <span class="sell-level-action">$${sellPrice.toFixed(1)} ${passed?'⚠️매도':''}</span>
+    </div>`;
+  }).join('');
+
+  document.getElementById('fromHighSection').innerHTML = `
+    <div style="display:flex;justify-content:space-between;margin-bottom:10px;font-size:.83rem;">
+      <span><span style="color:var(--muted)">전고점:</span> <strong>$${ath.toFixed(2)}</strong></span>
+      <span><span style="color:var(--muted)">현재:</span> <strong>$${currentPrice.toFixed(2)}</strong>
+        <span class="${pct>=0?'pos':'neg'}" style="margin-left:6px">${pct>=0?'+':''}${pct.toFixed(2)}%</span></span>
+    </div>
+    <div class="progress-bar" style="height:9px;margin-bottom:14px">
+      <div class="progress-fill" style="width:${Math.min(absPct/20*100,100)}%;background:${barColor}"></div>
+    </div>
+    ${rows}
+    <div style="margin-top:10px;font-size:.78rem;color:var(--muted)">
+      통과 구간: ${passedCount}단계 → 약 <strong style="color:var(--orange)">${passedCount*10}%</strong> 매도 권장
+    </div>
+  `;
+}
+
+// ── NASDAQ CARD ───────────────────────────────────────────
+function renderNasdaq(changePercent, price, todayStr) {
+  document.getElementById('nasdaqPrice').textContent = '지수: ' + (price||0).toLocaleString();
+  const el = document.getElementById('nasdaqChg');
+  el.className = 'card-value ' + (changePercent >= 0 ? 'pos' : 'neg');
+  el.textContent = (changePercent >= 0 ? '+' : '') + changePercent.toFixed(2) + '%';
+
+  let badge = '';
+  if (changePercent <= -3) {
+    badge = '<span class="badge badge-red">🚨 -3% 트리거 발동!</span>';
+    addEvent(todayStr, 'auto');
+  } else if (changePercent <= -2) {
+    badge = '<span class="badge badge-yellow">⚠️ 주의 구간 (-2%대)</span>';
+  } else if (changePercent >= 0) {
+    badge = '<span class="badge badge-green">✅ 상승</span>';
+  } else {
+    badge = '<span class="badge badge-muted">하락 중</span>';
+  }
+  document.getElementById('nasdaqBadge').innerHTML = badge;
+}
+
+// ── MAIN ──────────────────────────────────────────────────
+async function loadAll() {
+  const btn = document.getElementById('refreshBtn');
+  btn.disabled = true; btn.textContent = '로딩 중...';
+  document.getElementById('errorBox').style.display = 'none';
+
+  try {
+    // Parallel: quotes + NASDAQ chart
+    const [quotesRes, nasdaqRes] = await Promise.all([
+      fetchQuotes(WATCHLIST).catch(()=>[]),
+      fetchChart(NASDAQ_SYM, '5d', '1d').catch(()=>null)
+    ]);
+
+    // NASDAQ card
+    let todayStr = new Date().toISOString().slice(0,10);
+    if (nasdaqRes) {
+      const cls = nasdaqRes.closes;
+      const lastI = findLastI(cls);
+      if (lastI >= 1) {
+        const curr = cls[lastI], prev = cls[lastI-1];
+        const chg = (curr - prev) / prev * 100;
+        todayStr = nasdaqRes.dates[lastI] || todayStr;
+        renderNasdaq(chg, curr, todayStr);
+      } else {
+        const chg = nasdaqRes.meta?.regularMarketChangePercent || 0;
+        renderNasdaq(chg, nasdaqRes.meta?.regularMarketPrice, todayStr);
+      }
+    }
+
+    // Companies
+    let top1Sym = 'AAPL';
+    if (quotesRes.length) {
+      const sorted = renderCompanies(quotesRes);
+      if (sorted.length) top1Sym = sorted[0].symbol;
+    }
+
+    // Top1 company chart (1 year)
+    let chartData = null;
+    try { chartData = await fetchChart(encodeURIComponent(top1Sym.replace('^','%5E')), '1y', '1d'); }
+    catch {}
+
+    if (chartData) {
+      const validPairs = chartData.dates
+        .map((d,i) => [d, chartData.closes[i], chartData.highs[i]])
+        .filter(([,c]) => c != null);
+      const vDates  = validPairs.map(p=>p[0]);
+      const vCloses = validPairs.map(p=>p[1]);
+      const vHighs  = validPairs.map(p=>p[2]);
+
+      const ath = Math.max(...vHighs.filter(h=>h!=null));
+      const current = vCloses[vCloses.length - 1];
+
+      document.getElementById('chartTitle').textContent =
+        `${top1Sym} 주가 (1년) — 전고점 & 매도 구간`;
+      renderPriceChart(top1Sym, vDates, vCloses, ath);
+      renderFromHigh(top1Sym, current, ath);
+    }
+
+    updateStateUI();
+    renderHistory();
+    document.getElementById('lastUpdated').textContent =
+      '업데이트: ' + new Date().toLocaleTimeString('ko-KR');
+
+  } catch (err) {
+    const eb = document.getElementById('errorBox');
+    eb.style.display = 'block';
+    eb.textContent = '오류: ' + err.message + ' — Yahoo Finance CORS 제한일 수 있습니다.';
+  } finally {
+    btn.disabled = false; btn.textContent = '↻ 새로고침';
+  }
+}
+
+function findLastI(arr) {
+  for (let i = arr.length-1; i >= 0; i--) if (arr[i] != null) return i;
+  return -1;
+}
+
+// ── INIT ──────────────────────────────────────────────────
+document.getElementById('manualDate').value = new Date().toISOString().slice(0,10);
+updateStateUI();
+renderHistory();
+loadAll();
+</script>
+</body>
+</html>
