@@ -70,9 +70,16 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .company-cap { font-size: 0.9rem; font-weight: 600; }
 .company-chg { font-size: 0.8rem; }
 
-.cap-diff-box { text-align: center; padding: 10px; margin-top: 10px; background: rgba(88,166,255,.05); border-radius: 6px; border: 1px solid rgba(88,166,255,.2); }
-.cap-diff-label { font-size: 0.72rem; color: var(--muted); }
-.cap-diff-value { font-size: 1.15rem; font-weight: 700; color: var(--blue); margin-top: 2px; }
+.cap-diff-box { padding: 12px; margin-top: 12px; background: rgba(88,166,255,.05); border-radius: 6px; border: 1px solid rgba(88,166,255,.2); }
+.cap-diff-label { font-size: 0.72rem; color: var(--muted); margin-bottom: 8px; }
+.cap-bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-size: 0.8rem; }
+.cap-bar-name { width: 42px; text-align: right; font-weight: 600; flex-shrink: 0; }
+.cap-bar-track { flex: 1; height: 10px; background: var(--border); border-radius: 5px; overflow: hidden; }
+.cap-bar-fill { height: 100%; border-radius: 5px; }
+.cap-bar-val { width: 58px; font-size: 0.78rem; color: var(--muted); flex-shrink: 0; }
+.cap-gap-line { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.cap-gap-abs { font-size: 1.05rem; font-weight: 700; color: var(--blue); }
+.cap-gap-pct { font-size: 0.78rem; color: var(--muted); }
 
 /* Sell levels */
 .sell-level-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.82rem; }
@@ -152,10 +159,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
   <div class="card">
     <h2>시총 순위 (나스닥 상장사)</h2>
     <div id="companyList"><div class="loading"><div class="spinner"></div>로딩 중...</div></div>
-    <div class="cap-diff-box" id="capDiffBox" style="display:none">
-      <div class="cap-diff-label">1위 − 2위 시총 차이</div>
-      <div class="cap-diff-value" id="capDiffVal">--</div>
-    </div>
+    <div class="cap-diff-box" id="capDiffBox" style="display:none"></div>
   </div>
   <div class="card">
     <h2>전고점 대비 하락 구간 (시총 1위)</h2>
@@ -444,9 +448,34 @@ function renderCompanies(quotes) {
   }).join('');
 
   if (sorted.length >= 2) {
-    const diff = sorted[0].marketCap - sorted[1].marketCap;
+    const cap1 = sorted[0].marketCap, cap2 = sorted[1].marketCap;
+    const diff = cap1 - cap2;
+    const diffPct = (diff / cap2 * 100).toFixed(1);
+    const bar2W = (cap2 / cap1 * 100).toFixed(1);
     document.getElementById('capDiffBox').style.display = 'block';
-    document.getElementById('capDiffVal').textContent = fmtCap(diff);
+    document.getElementById('capDiffBox').innerHTML = `
+      <div class="cap-diff-label">시총 1위 vs 2위 비교</div>
+      <div class="cap-bar-row">
+        <span class="cap-bar-name" style="color:var(--blue)">${sorted[0].symbol}</span>
+        <div class="cap-bar-track"><div class="cap-bar-fill" style="width:100%;background:var(--blue)"></div></div>
+        <span class="cap-bar-val">${fmtCap(cap1)}</span>
+      </div>
+      <div class="cap-bar-row">
+        <span class="cap-bar-name" style="color:var(--muted)">${sorted[1].symbol}</span>
+        <div class="cap-bar-track"><div class="cap-bar-fill" style="width:${bar2W}%;background:var(--muted)"></div></div>
+        <span class="cap-bar-val">${fmtCap(cap2)}</span>
+      </div>
+      <div class="cap-gap-line">
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:2px">격차 (1위 − 2위)</div>
+          <div class="cap-gap-abs">+${fmtCap(diff)}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:2px">1위가 2위보다</div>
+          <div style="font-size:1.05rem;font-weight:700;color:var(--orange)">+${diffPct}% 큼</div>
+        </div>
+      </div>
+    `;
   }
   return sorted;
 }
