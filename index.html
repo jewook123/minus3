@@ -183,10 +183,13 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 <script>
 // ── CONFIG ────────────────────────────────────────────────
-const WATCHLIST = ['AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA'];
-const NASDAQ_SYM = '%5EIXIC'; // ^IXIC URL-encoded
+const WATCHLIST   = ['NVDA','AAPL','MSFT','AMZN','GOOGL','META','TSLA'];
 const SELL_LEVELS = [-2.5,-5,-7.5,-10,-12.5,-15,-17.5,-20];
-const PROXY = 'https://corsproxy.io/?';
+// CORS 프록시 (순서대로 시도)
+const PROXIES = ['https://corsproxy.io/?', 'https://api.allorigins.win/raw?url='];
+// 발행 주식수 (백만주, 2025 Q2 기준 근사치 — 분기별 업데이트)
+const SHARES_M = { NVDA:24440, AAPL:15310, MSFT:7430, AMZN:10590, GOOGL:12130, META:2560, TSLA:3220 };
+const CO_NAMES  = { NVDA:'NVIDIA', AAPL:'Apple', MSFT:'Microsoft', AMZN:'Amazon', GOOGL:'Alphabet', META:'Meta', TSLA:'Tesla' };
 
 // ── STORAGE ───────────────────────────────────────────────
 function getEvents() {
@@ -312,62 +315,70 @@ function addManual() {
   document.getElementById('manualDate').value = '';
 }
 
-// ── API ───────────────────────────────────────────────────
-const YF2 = 'https://query2.finance.yahoo.com';
-const YF1 = 'https://query1.finance.yahoo.com';
-
+// ── API (Stooq — 무인증, CORS 프록시 경유) ────────────────
 function mkSignal(ms) {
-  const c = new AbortController();
-  setTimeout(() => c.abort(), ms);
-  return c.signal;
+  const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal;
 }
 
-async function yfFetch(url) {
-  // 1) query2 direct  2) query1 direct  3) corsproxy.io
-  for (const u of [url, url.replace(YF2, YF1)]) {
+async function proxyFetch(rawUrl) {
+  // 직접 시도
+  try {
+    const r = await fetch(rawUrl, { signal: mkSignal(6000) });
+    if (r.ok) return r.text();
+  } catch {}
+  // 프록시 순차 시도
+  for (const proxy of PROXIES) {
     try {
-      const r = await fetch(u, { signal: mkSignal(6000) });
+      const r = await fetch(proxy + encodeURIComponent(rawUrl), { signal: mkSignal(10000) });
       if (r.ok) {
-        const j = await r.json();
-        // Yahoo Finance sometimes returns 200 with an error body
-        const err = j?.chart?.error || j?.quoteSummary?.error;
-        if (err) continue;
-        return j;
+        // allorigins는 JSON 래퍼로 반환
+        const text = await r.text();
+        try { const j = JSON.parse(text); return j.contents ?? text; }
+        catch { return text; }
       }
-    } catch (e) { if (e.name === 'AbortError') continue; }
+    } catch {}
   }
-  const r = await fetch(PROXY + encodeURIComponent(url), { signal: mkSignal(12000) });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+  throw new Error(`로딩 실패: ${rawUrl}`);
 }
 
-// 종목별 시총·등락 조회 (v7/quote 대신 quoteSummary/price 모듈 사용 — crumb 불필요)
+function parseCSV(text) {
+  const lines = text.trim().split('\n').filter(l => l.trim());
+  if (lines.length < 2) return [];
+  return lines.slice(1).map(l => {
+    const p = l.split(',');
+    return { date:p[0]?.trim(), open:+p[1], high:+p[2], low:+p[3], close:+p[4], volume:+p[5]||0 };
+  }).filter(r => r.date && r.close > 0 && !isNaN(r.close)).sort((a,b) => a.date.localeCompare(b.date));
+}
+
+async function stooqFetch(symbol, last) {
+  const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=d`;
+  const text = await proxyFetch(url);
+  const rows = parseCSV(text);
+  return last ? rows.slice(-last) : rows;
+}
+
 async function fetchCompanyData(symbol) {
-  const url = `${YF2}/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=price`;
-  const data = await yfFetch(url);
-  const p = data?.quoteSummary?.result?.[0]?.price;
-  if (!p) return null;
+  const rows = await stooqFetch(symbol.toLowerCase() + '.us', 5);
+  if (!rows.length) return null;
+  const latest = rows[rows.length - 1];
+  const prev   = rows.length >= 2 ? rows[rows.length - 2] : null;
+  const chgPct = prev ? (latest.close - prev.close) / prev.close * 100 : 0;
   return {
     symbol,
-    shortName: p.shortName || symbol,
-    marketCap: p.marketCap?.raw || 0,
-    regularMarketPrice: p.regularMarketPrice?.raw || 0,
-    regularMarketChangePercent: (p.regularMarketChangePercent?.raw || 0) * 100,
+    shortName: CO_NAMES[symbol] || symbol,
+    regularMarketPrice: latest.close,
+    regularMarketChangePercent: chgPct,
+    marketCap: latest.close * (SHARES_M[symbol] || 0) * 1e6,
   };
 }
 
-async function fetchChart(sym, range, interval) {
-  const url = `${YF2}/v8/finance/chart/${sym}?interval=${interval}&range=${range}`;
-  const data = await yfFetch(url);
-  const r = data?.chart?.result?.[0];
-  if (!r) throw new Error('차트 데이터 없음');
-  const ts = r.timestamp || [];
-  const q  = r.indicators?.quote?.[0] || {};
-  const dates = ts.map(t => {
-    const d = new Date(t * 1000);
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  });
-  return { meta: r.meta, dates, closes: q.close || [], highs: q.high || [] };
+async function fetchNasdaqRows() {
+  try { return await stooqFetch('^ndx', 5); }   // NASDAQ-100
+  catch { return stooqFetch('^ixic', 5); }       // Composite 폴백
+}
+
+async function fetchStockChart(symbol) {
+  return stooqFetch(symbol.toLowerCase() + '.us', 280); // ~1년
 }
 
 // ── CHART ─────────────────────────────────────────────────
@@ -548,26 +559,20 @@ async function loadAll() {
   document.getElementById('errorBox').style.display = 'none';
 
   try {
-    // 종목별 데이터 + 나스닥 차트 병렬 요청
-    const [companyResults, nasdaqRes] = await Promise.all([
-      Promise.all(WATCHLIST.map(s => fetchCompanyData(s).catch(() => null))),
-      fetchChart(NASDAQ_SYM, '5d', '1d').catch(() => null)
+    // 병렬: 나스닥 + 전 종목
+    const [nasdaqRows, ...companyResults] = await Promise.all([
+      fetchNasdaqRows().catch(() => null),
+      ...WATCHLIST.map(s => fetchCompanyData(s).catch(() => null))
     ]);
 
     // 나스닥 카드
     let todayStr = new Date().toISOString().slice(0,10);
-    if (nasdaqRes) {
-      const cls = nasdaqRes.closes;
-      const lastI = findLastI(cls);
-      if (lastI >= 1) {
-        const curr = cls[lastI], prev = cls[lastI-1];
-        const chg = (curr - prev) / prev * 100;
-        todayStr = nasdaqRes.dates[lastI] || todayStr;
-        renderNasdaq(chg, curr, todayStr);
-      } else {
-        renderNasdaq(nasdaqRes.meta?.regularMarketChangePercent || 0,
-                     nasdaqRes.meta?.regularMarketPrice, todayStr);
-      }
+    if (nasdaqRows && nasdaqRows.length >= 2) {
+      const curr = nasdaqRows[nasdaqRows.length - 1];
+      const prev = nasdaqRows[nasdaqRows.length - 2];
+      const chg  = (curr.close - prev.close) / prev.close * 100;
+      todayStr = curr.date || todayStr;
+      renderNasdaq(chg, curr.close, todayStr);
     } else {
       document.getElementById('nasdaqChg').textContent = '로딩 실패';
       document.getElementById('nasdaqPrice').textContent = '새로고침을 눌러주세요';
@@ -582,49 +587,38 @@ async function loadAll() {
     } else {
       document.getElementById('companyList').innerHTML =
         '<div style="color:var(--red);font-size:.84rem;padding:10px 0">⚠ 시총 데이터 로딩 실패 — 잠시 후 새로고침</div>';
-      document.getElementById('fromHighSection').innerHTML =
-        '<div style="color:var(--muted);font-size:.84rem;padding:10px 0">시총 1위 종목을 확인할 수 없습니다.</div>';
     }
 
     // 시총 1위 차트 (1년)
     if (top1Sym) {
       try {
-        const chartData = await fetchChart(encodeURIComponent(top1Sym), '1y', '1d');
-        const validPairs = chartData.dates
-          .map((d,i) => [d, chartData.closes[i], chartData.highs[i]])
-          .filter(([,c]) => c != null);
-        const vDates  = validPairs.map(p => p[0]);
-        const vCloses = validPairs.map(p => p[1]);
-        const vHighs  = validPairs.map(p => p[2]);
-        const ath     = Math.max(...vHighs.filter(h => h != null));
-        const current = vCloses[vCloses.length - 1];
+        const rows    = await fetchStockChart(top1Sym);
+        const dates   = rows.map(r => r.date);
+        const closes  = rows.map(r => r.close);
+        const highs   = rows.map(r => r.high);
+        const ath     = Math.max(...highs.filter(h => h > 0));
+        const current = closes[closes.length - 1];
         document.getElementById('chartTitle').textContent =
           `${top1Sym} 주가 (1년) — 전고점 & 매도 구간`;
-        renderPriceChart(top1Sym, vDates, vCloses, ath);
+        renderPriceChart(top1Sym, dates, closes, ath);
         renderFromHigh(top1Sym, current, ath);
-      } catch (chartErr) {
+      } catch (e) {
         document.getElementById('fromHighSection').innerHTML =
-          `<div style="color:var(--red);font-size:.84rem;padding:10px 0">차트 로딩 실패: ${chartErr.message}</div>`;
+          `<div style="color:var(--red);font-size:.84rem;padding:10px 0">차트 로딩 실패: ${e.message}</div>`;
       }
     }
 
     updateStateUI();
     renderHistory();
     document.getElementById('lastUpdated').textContent =
-      '업데이트: ' + new Date().toLocaleTimeString('ko-KR');
+      '업데이트: ' + new Date().toLocaleTimeString('ko-KR') + ' (Stooq)';
 
   } catch (err) {
-    const eb = document.getElementById('errorBox');
-    eb.style.display = 'block';
-    eb.textContent = '오류: ' + err.message;
+    document.getElementById('errorBox').style.display = 'block';
+    document.getElementById('errorBox').textContent = '오류: ' + err.message;
   } finally {
     btn.disabled = false; btn.textContent = '↻ 새로고침';
   }
-}
-
-function findLastI(arr) {
-  for (let i = arr.length-1; i >= 0; i--) if (arr[i] != null) return i;
-  return -1;
 }
 
 // ── INIT ──────────────────────────────────────────────────
