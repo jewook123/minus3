@@ -309,27 +309,52 @@ function addManual() {
 }
 
 // ── API ───────────────────────────────────────────────────
-async function yf(path) {
-  const url = 'https://query1.finance.yahoo.com' + path;
-  // Try direct; fall back to CORS proxy
-  for (const base of ['', PROXY]) {
-    try {
-      const res = await fetch(base + (base ? encodeURIComponent(url) : url),
-        { signal: AbortSignal.timeout(8000) });
-      if (res.ok) return res.json();
-    } catch {}
-  }
-  throw new Error('데이터 로딩 실패 (네트워크/CORS)');
+const YF2 = 'https://query2.finance.yahoo.com';
+const YF1 = 'https://query1.finance.yahoo.com';
+
+function mkSignal(ms) {
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
 }
 
-async function fetchQuotes(syms) {
-  const fields = 'regularMarketPrice,regularMarketChangePercent,marketCap,shortName';
-  const data = await yf(`/v7/finance/quote?symbols=${syms.join(',')}&fields=${fields}`);
-  return data?.quoteResponse?.result || [];
+async function yfFetch(url) {
+  // 1) query2 direct  2) query1 direct  3) corsproxy.io
+  for (const u of [url, url.replace(YF2, YF1)]) {
+    try {
+      const r = await fetch(u, { signal: mkSignal(6000) });
+      if (r.ok) {
+        const j = await r.json();
+        // Yahoo Finance sometimes returns 200 with an error body
+        const err = j?.chart?.error || j?.quoteSummary?.error;
+        if (err) continue;
+        return j;
+      }
+    } catch (e) { if (e.name === 'AbortError') continue; }
+  }
+  const r = await fetch(PROXY + encodeURIComponent(url), { signal: mkSignal(12000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// 종목별 시총·등락 조회 (v7/quote 대신 quoteSummary/price 모듈 사용 — crumb 불필요)
+async function fetchCompanyData(symbol) {
+  const url = `${YF2}/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=price`;
+  const data = await yfFetch(url);
+  const p = data?.quoteSummary?.result?.[0]?.price;
+  if (!p) return null;
+  return {
+    symbol,
+    shortName: p.shortName || symbol,
+    marketCap: p.marketCap?.raw || 0,
+    regularMarketPrice: p.regularMarketPrice?.raw || 0,
+    regularMarketChangePercent: (p.regularMarketChangePercent?.raw || 0) * 100,
+  };
 }
 
 async function fetchChart(sym, range, interval) {
-  const data = await yf(`/v8/finance/chart/${sym}?interval=${interval}&range=${range}`);
+  const url = `${YF2}/v8/finance/chart/${sym}?interval=${interval}&range=${range}`;
+  const data = await yfFetch(url);
   const r = data?.chart?.result?.[0];
   if (!r) throw new Error('차트 데이터 없음');
   const ts = r.timestamp || [];
@@ -494,13 +519,13 @@ async function loadAll() {
   document.getElementById('errorBox').style.display = 'none';
 
   try {
-    // Parallel: quotes + NASDAQ chart
-    const [quotesRes, nasdaqRes] = await Promise.all([
-      fetchQuotes(WATCHLIST).catch(()=>[]),
-      fetchChart(NASDAQ_SYM, '5d', '1d').catch(()=>null)
+    // 종목별 데이터 + 나스닥 차트 병렬 요청
+    const [companyResults, nasdaqRes] = await Promise.all([
+      Promise.all(WATCHLIST.map(s => fetchCompanyData(s).catch(() => null))),
+      fetchChart(NASDAQ_SYM, '5d', '1d').catch(() => null)
     ]);
 
-    // NASDAQ card
+    // 나스닥 카드
     let todayStr = new Date().toISOString().slice(0,10);
     if (nasdaqRes) {
       const cls = nasdaqRes.closes;
@@ -511,38 +536,47 @@ async function loadAll() {
         todayStr = nasdaqRes.dates[lastI] || todayStr;
         renderNasdaq(chg, curr, todayStr);
       } else {
-        const chg = nasdaqRes.meta?.regularMarketChangePercent || 0;
-        renderNasdaq(chg, nasdaqRes.meta?.regularMarketPrice, todayStr);
+        renderNasdaq(nasdaqRes.meta?.regularMarketChangePercent || 0,
+                     nasdaqRes.meta?.regularMarketPrice, todayStr);
       }
+    } else {
+      document.getElementById('nasdaqChg').textContent = '로딩 실패';
+      document.getElementById('nasdaqPrice').textContent = '새로고침을 눌러주세요';
     }
 
-    // Companies
-    let top1Sym = 'AAPL';
-    if (quotesRes.length) {
-      const sorted = renderCompanies(quotesRes);
+    // 시총 순위
+    const validCos = companyResults.filter(Boolean);
+    let top1Sym = null;
+    if (validCos.length > 0) {
+      const sorted = renderCompanies(validCos);
       if (sorted.length) top1Sym = sorted[0].symbol;
+    } else {
+      document.getElementById('companyList').innerHTML =
+        '<div style="color:var(--red);font-size:.84rem;padding:10px 0">⚠ 시총 데이터 로딩 실패 — 잠시 후 새로고침</div>';
+      document.getElementById('fromHighSection').innerHTML =
+        '<div style="color:var(--muted);font-size:.84rem;padding:10px 0">시총 1위 종목을 확인할 수 없습니다.</div>';
     }
 
-    // Top1 company chart (1 year)
-    let chartData = null;
-    try { chartData = await fetchChart(encodeURIComponent(top1Sym.replace('^','%5E')), '1y', '1d'); }
-    catch {}
-
-    if (chartData) {
-      const validPairs = chartData.dates
-        .map((d,i) => [d, chartData.closes[i], chartData.highs[i]])
-        .filter(([,c]) => c != null);
-      const vDates  = validPairs.map(p=>p[0]);
-      const vCloses = validPairs.map(p=>p[1]);
-      const vHighs  = validPairs.map(p=>p[2]);
-
-      const ath = Math.max(...vHighs.filter(h=>h!=null));
-      const current = vCloses[vCloses.length - 1];
-
-      document.getElementById('chartTitle').textContent =
-        `${top1Sym} 주가 (1년) — 전고점 & 매도 구간`;
-      renderPriceChart(top1Sym, vDates, vCloses, ath);
-      renderFromHigh(top1Sym, current, ath);
+    // 시총 1위 차트 (1년)
+    if (top1Sym) {
+      try {
+        const chartData = await fetchChart(encodeURIComponent(top1Sym), '1y', '1d');
+        const validPairs = chartData.dates
+          .map((d,i) => [d, chartData.closes[i], chartData.highs[i]])
+          .filter(([,c]) => c != null);
+        const vDates  = validPairs.map(p => p[0]);
+        const vCloses = validPairs.map(p => p[1]);
+        const vHighs  = validPairs.map(p => p[2]);
+        const ath     = Math.max(...vHighs.filter(h => h != null));
+        const current = vCloses[vCloses.length - 1];
+        document.getElementById('chartTitle').textContent =
+          `${top1Sym} 주가 (1년) — 전고점 & 매도 구간`;
+        renderPriceChart(top1Sym, vDates, vCloses, ath);
+        renderFromHigh(top1Sym, current, ath);
+      } catch (chartErr) {
+        document.getElementById('fromHighSection').innerHTML =
+          `<div style="color:var(--red);font-size:.84rem;padding:10px 0">차트 로딩 실패: ${chartErr.message}</div>`;
+      }
     }
 
     updateStateUI();
@@ -553,7 +587,7 @@ async function loadAll() {
   } catch (err) {
     const eb = document.getElementById('errorBox');
     eb.style.display = 'block';
-    eb.textContent = '오류: ' + err.message + ' — Yahoo Finance CORS 제한일 수 있습니다.';
+    eb.textContent = '오류: ' + err.message;
   } finally {
     btn.disabled = false; btn.textContent = '↻ 새로고침';
   }
