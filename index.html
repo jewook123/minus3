@@ -185,9 +185,14 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 // ── CONFIG ────────────────────────────────────────────────
 const WATCHLIST   = ['NVDA','AAPL','MSFT','AMZN','GOOGL','META','TSLA'];
 const SELL_LEVELS = [-2.5,-5,-7.5,-10,-12.5,-15,-17.5,-20];
-// CORS 프록시 (순서대로 시도)
-const PROXIES = ['https://corsproxy.io/?', 'https://api.allorigins.win/raw?url='];
-// 발행 주식수 (백만주, 2025 Q2 기준 근사치 — 분기별 업데이트)
+const PROXIES     = ['https://corsproxy.io/?', 'https://api.allorigins.win/raw?url='];
+
+// 네이버 증권 설정
+const NAVER_BASE = 'https://m.stock.naver.com';
+// 나스닥 상장 종목은 .O (NASDAQ), NYSE는 .N 접미사
+const NAVER_SYM  = { NVDA:'NVDA.O', AAPL:'AAPL.O', MSFT:'MSFT.O', AMZN:'AMZN.O', GOOGL:'GOOGL.O', META:'META.O', TSLA:'TSLA.O' };
+
+// Stooq 폴백용 발행주식수 (백만주, 2025 Q2 근사치)
 const SHARES_M = { NVDA:24440, AAPL:15310, MSFT:7430, AMZN:10590, GOOGL:12130, META:2560, TSLA:3220 };
 const CO_NAMES  = { NVDA:'NVIDIA', AAPL:'Apple', MSFT:'Microsoft', AMZN:'Amazon', GOOGL:'Alphabet', META:'Meta', TSLA:'Tesla' };
 
@@ -315,23 +320,21 @@ function addManual() {
   document.getElementById('manualDate').value = '';
 }
 
-// ── API (Stooq — 무인증, CORS 프록시 경유) ────────────────
+// ── API ────────────────────────────────────────────────────
 function mkSignal(ms) {
   const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal;
 }
 
+// 공통 프록시 fetch (텍스트 반환)
 async function proxyFetch(rawUrl) {
-  // 직접 시도
   try {
     const r = await fetch(rawUrl, { signal: mkSignal(6000) });
     if (r.ok) return r.text();
   } catch {}
-  // 프록시 순차 시도
   for (const proxy of PROXIES) {
     try {
       const r = await fetch(proxy + encodeURIComponent(rawUrl), { signal: mkSignal(10000) });
       if (r.ok) {
-        // allorigins는 JSON 래퍼로 반환
         const text = await r.text();
         try { const j = JSON.parse(text); return j.contents ?? text; }
         catch { return text; }
@@ -341,44 +344,122 @@ async function proxyFetch(rawUrl) {
   throw new Error(`로딩 실패: ${rawUrl}`);
 }
 
+// ── 네이버 증권 API ────────────────────────────────────────
+// 엔드포인트: m.stock.naver.com/api/
+//   index/{코드}/basic          → 지수 기본정보 (IXIC = 나스닥 종합)
+//   stock/{종목.O}/basic        → 해외종목 기본정보 (시총 포함)
+//   stock/{종목.O}/candle/day   → 일별 캔들 데이터
+
+async function naverFetch(path) {
+  const text = await proxyFetch(NAVER_BASE + path);
+  return JSON.parse(text);
+}
+
+function np(str) { return parseFloat((str || '0').replace(/,/g, '')) || 0; }
+
+// stockItemTotalInfos 배열에서 시가총액 추출
+// suffix 예시: "억달러", "조달러", "십억달러"
+function parseNaverCap(infos) {
+  if (!Array.isArray(infos)) return 0;
+  const item = infos.find(i => i.code === 'marketValue' || (i.key||'').includes('시가총액'));
+  if (!item) return 0;
+  const val = parseFloat((item.value||'0').replace(/[,\s]/g,'')) || 0;
+  const s   = item.suffix || '';
+  if (s.includes('조'))   return val * 1e12;
+  if (s.includes('십억')) return val * 1e9;
+  if (s.includes('억'))   return val * 1e8;  // 억달러
+  return val * 1e8;
+}
+
+async function naverCompany(symbol) {
+  const ns = NAVER_SYM[symbol]; if (!ns) throw new Error('no naver sym');
+  const d = await naverFetch(`/api/stock/${ns}/basic`);
+  const cap = parseNaverCap(d.stockItemTotalInfos);
+  return {
+    symbol,
+    shortName:   d.itemNameEng || d.stockName || CO_NAMES[symbol] || symbol,
+    regularMarketPrice:         np(d.closePrice),
+    regularMarketChangePercent: np(d.fluctuationsRatio),
+    marketCap: cap,
+    _source: 'naver',
+  };
+}
+
+async function naverNasdaq() {
+  // IXIC = 나스닥 종합지수
+  const d = await naverFetch('/api/index/IXIC/basic');
+  return {
+    close:   np(d.closePrice),
+    chgPct:  np(d.fluctuationsRatio),
+    date:    new Date().toISOString().slice(0,10),
+    _naver:  true,
+  };
+}
+
+async function naverChart(symbol) {
+  const ns = NAVER_SYM[symbol]; if (!ns) throw new Error('no naver sym');
+  const arr = await naverFetch(`/api/stock/${ns}/candle/day?count=280`);
+  if (!Array.isArray(arr)) throw new Error('not array');
+  return arr.map(d => ({
+    date:  d.localDate ? `${d.localDate.slice(0,4)}-${d.localDate.slice(4,6)}-${d.localDate.slice(6,8)}` : '',
+    open:  np(d.openPrice), high: np(d.highPrice),
+    low:   np(d.lowPrice),  close: np(d.closePrice),
+  })).filter(r => r.date && r.close > 0).sort((a,b) => a.date.localeCompare(b.date));
+}
+
+// ── Stooq CSV (폴백) ────────────────────────────────────────
 function parseCSV(text) {
   const lines = text.trim().split('\n').filter(l => l.trim());
   if (lines.length < 2) return [];
   return lines.slice(1).map(l => {
     const p = l.split(',');
-    return { date:p[0]?.trim(), open:+p[1], high:+p[2], low:+p[3], close:+p[4], volume:+p[5]||0 };
+    return { date:p[0]?.trim(), open:+p[1], high:+p[2], low:+p[3], close:+p[4] };
   }).filter(r => r.date && r.close > 0 && !isNaN(r.close)).sort((a,b) => a.date.localeCompare(b.date));
 }
 
 async function stooqFetch(symbol, last) {
   const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=d`;
-  const text = await proxyFetch(url);
-  const rows = parseCSV(text);
+  const rows = parseCSV(await proxyFetch(url));
   return last ? rows.slice(-last) : rows;
 }
 
+// ── 통합 fetch (Naver 우선 → Stooq 폴백) ──────────────────
+let _dataSource = 'naver'; // 상태 추적용
+
 async function fetchCompanyData(symbol) {
+  try {
+    const d = await naverCompany(symbol);
+    if (d.regularMarketPrice > 0) { _dataSource = 'naver'; return d; }
+  } catch {}
+  // Stooq 폴백
+  _dataSource = 'stooq';
   const rows = await stooqFetch(symbol.toLowerCase() + '.us', 5);
   if (!rows.length) return null;
-  const latest = rows[rows.length - 1];
-  const prev   = rows.length >= 2 ? rows[rows.length - 2] : null;
-  const chgPct = prev ? (latest.close - prev.close) / prev.close * 100 : 0;
+  const latest = rows[rows.length-1], prev = rows[rows.length-2];
   return {
-    symbol,
-    shortName: CO_NAMES[symbol] || symbol,
+    symbol, shortName: CO_NAMES[symbol] || symbol,
     regularMarketPrice: latest.close,
-    regularMarketChangePercent: chgPct,
-    marketCap: latest.close * (SHARES_M[symbol] || 0) * 1e6,
+    regularMarketChangePercent: prev ? (latest.close-prev.close)/prev.close*100 : 0,
+    marketCap: latest.close * (SHARES_M[symbol]||0) * 1e6,
+    _source: 'stooq',
   };
 }
 
 async function fetchNasdaqRows() {
-  try { return await stooqFetch('^ndx', 5); }   // NASDAQ-100
-  catch { return stooqFetch('^ixic', 5); }       // Composite 폴백
+  try {
+    const d = await naverNasdaq();
+    if (d.close > 0) return [d];
+  } catch {}
+  try { return await stooqFetch('^ndx', 5); } catch {}
+  return stooqFetch('^ixic', 5);
 }
 
 async function fetchStockChart(symbol) {
-  return stooqFetch(symbol.toLowerCase() + '.us', 280); // ~1년
+  try {
+    const rows = await naverChart(symbol);
+    if (rows.length > 50) return rows;
+  } catch {}
+  return stooqFetch(symbol.toLowerCase() + '.us', 280);
 }
 
 // ── CHART ─────────────────────────────────────────────────
@@ -567,12 +648,18 @@ async function loadAll() {
 
     // 나스닥 카드
     let todayStr = new Date().toISOString().slice(0,10);
-    if (nasdaqRows && nasdaqRows.length >= 2) {
-      const curr = nasdaqRows[nasdaqRows.length - 1];
-      const prev = nasdaqRows[nasdaqRows.length - 2];
-      const chg  = (curr.close - prev.close) / prev.close * 100;
-      todayStr = curr.date || todayStr;
-      renderNasdaq(chg, curr.close, todayStr);
+    if (nasdaqRows && nasdaqRows.length >= 1) {
+      const row = nasdaqRows[nasdaqRows.length - 1];
+      if (row._naver) {
+        // 네이버는 등락률 직접 제공
+        todayStr = row.date || todayStr;
+        renderNasdaq(row.chgPct, row.close, todayStr);
+      } else if (nasdaqRows.length >= 2) {
+        const curr = row, prev = nasdaqRows[nasdaqRows.length - 2];
+        const chg  = (curr.close - prev.close) / prev.close * 100;
+        todayStr   = curr.date || todayStr;
+        renderNasdaq(chg, curr.close, todayStr);
+      }
     } else {
       document.getElementById('nasdaqChg').textContent = '로딩 실패';
       document.getElementById('nasdaqPrice').textContent = '새로고침을 눌러주세요';
@@ -610,8 +697,9 @@ async function loadAll() {
 
     updateStateUI();
     renderHistory();
+    const src = validCos.length && validCos[0]._source === 'naver' ? '네이버 증권' : 'Stooq';
     document.getElementById('lastUpdated').textContent =
-      '업데이트: ' + new Date().toLocaleTimeString('ko-KR') + ' (Stooq)';
+      '업데이트: ' + new Date().toLocaleTimeString('ko-KR') + ` (${src})`;
 
   } catch (err) {
     document.getElementById('errorBox').style.display = 'block';
